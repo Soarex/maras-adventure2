@@ -2,14 +2,14 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
-[RequireComponent(typeof(Rigidbody))]
+[RequireComponent(typeof(CharacterController))]
 public class PlayerController : MonoBehaviour
 {
     [SerializeField]
     Transform playerInputSpace = default;
 
     [SerializeField, Range(0, 50)]
-    float speed = 6.7f;
+    float maxSpeed = 6.7f;
 
     [SerializeField, Range(0, 50)]
     float acceleration;
@@ -38,25 +38,25 @@ public class PlayerController : MonoBehaviour
     [SerializeField]
     LayerMask probeMask = -1;
 
-    private Rigidbody rigidBody;
+    private CharacterController characterController;
+    private Animator animator;
     private Vector3 velocity;
     private Vector3 direction;
     private Vector3 desiredVelocity;
-    private Vector3 cameraOffset;
     private float turnSmoothVelocity;
-    private bool desiredJump;
     private int jumpPhase;
     private float minGroundDotProduct;
     private Vector3 contactNormal, steepNormal;
     private int stepsSinceLastGrounded, stepsSinceLastJump;
 
     private int groundContactCount, steepContactCount;
-    bool OnGround => groundContactCount > 0;
+    bool OnGround => characterController.isGrounded;
     bool OnSteep => steepContactCount > 0;
 
     void Start()
     {
-        rigidBody = GetComponent<Rigidbody>();
+        characterController = GetComponent<CharacterController>();
+        animator = GetComponent<Animator>();
     }
 
     private void Awake()
@@ -85,58 +85,32 @@ public class PlayerController : MonoBehaviour
             right.Normalize();
 
             direction = forward * direction.z + right * direction.x;
-            desiredVelocity = direction * speed;
+            desiredVelocity = direction * maxSpeed;
         }
         else
-            desiredVelocity = direction * speed;
+            desiredVelocity = direction * maxSpeed;
+
+        UpdateState();
+        AdjustVelocity();
 
         if (direction.magnitude != 0)
         {
             float angle = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
             transform.eulerAngles = Vector3.up * Mathf.SmoothDampAngle(transform.eulerAngles.y, angle, ref turnSmoothVelocity, turnSmoothTime);
         }
-        
 
-        desiredJump |= Input.GetButtonDown("Jump");
-    }
+        velocity += Physics.gravity * Time.deltaTime;
 
-    void FixedUpdate()
-    {
-        UpdateState();
-        AdjustVelocity();
+        if (OnGround)
+            velocity.y = 0;
 
-        if (desiredJump)
-        {
-            desiredJump = false;
-            Jump();
-        }
+        if(Input.GetButtonDown("Jump")) Jump();
 
-        rigidBody.velocity = velocity;
+        characterController.Move(velocity * Time.deltaTime);
+
+        animator.SetFloat("Blend", new Vector3(velocity.x, 0, velocity.z).sqrMagnitude / maxSpeed);
+
         ClearState();
-    }
-
-    Vector3 ProjectOnContactPlane(Vector3 vector)
-    {
-        return vector - contactNormal * Vector3.Dot(vector, contactNormal);
-    }
-
-    void AdjustVelocity()
-    {
-        Vector3 xAxis = ProjectOnContactPlane(Vector3.right).normalized;
-        Vector3 zAxis = ProjectOnContactPlane(Vector3.forward).normalized;
-
-        float currentX = Vector3.Dot(velocity, xAxis);
-        float currentZ = Vector3.Dot(velocity, zAxis);
-
-        float _acceleration = OnGround ? acceleration : maxAirAcceleration;
-        float maxSpeedChange = _acceleration * Time.deltaTime;
-
-        float newX =
-            Mathf.MoveTowards(currentX, desiredVelocity.x, maxSpeedChange);
-        float newZ =
-            Mathf.MoveTowards(currentZ, desiredVelocity.z, maxSpeedChange);
-
-        velocity += xAxis * (newX - currentX) + zAxis * (newZ - currentZ);
     }
 
     void Jump()
@@ -170,6 +144,53 @@ public class PlayerController : MonoBehaviour
 
     }
 
+    void ClearState()
+    {
+        groundContactCount = steepContactCount = 0;
+        contactNormal = Vector3.zero;
+    }
+
+    void UpdateState()
+    {
+        stepsSinceLastGrounded += 1;
+        stepsSinceLastJump += 1;
+        velocity = characterController.velocity;
+        if (OnGround || SnapToGround() || CheckSteepContacts())
+        {
+            stepsSinceLastGrounded = 0;
+            if (stepsSinceLastJump > 1) jumpPhase = 0;
+            if (groundContactCount > 1)
+                contactNormal.Normalize();
+        }
+        else
+            contactNormal = Vector3.up;
+
+    }
+
+    Vector3 ProjectOnContactPlane(Vector3 vector)
+    {
+        return vector - contactNormal * Vector3.Dot(vector, contactNormal);
+    }
+
+    void AdjustVelocity()
+    {
+        Vector3 xAxis = ProjectOnContactPlane(Vector3.right).normalized;
+        Vector3 zAxis = ProjectOnContactPlane(Vector3.forward).normalized;
+
+        float currentX = Vector3.Dot(velocity, xAxis);
+        float currentZ = Vector3.Dot(velocity, zAxis);
+
+        float _acceleration = OnGround ? acceleration : maxAirAcceleration;
+        float maxSpeedChange = _acceleration * Time.deltaTime;
+
+        float newX =
+            Mathf.MoveTowards(currentX, desiredVelocity.x, maxSpeedChange);
+        float newZ =
+            Mathf.MoveTowards(currentZ, desiredVelocity.z, maxSpeedChange);
+
+        velocity += xAxis * (newX - currentX) + zAxis * (newZ - currentZ);
+    }
+
     void OnCollisionEnter(Collision collision)
     {
         EvaluateCollision(collision);
@@ -199,29 +220,6 @@ public class PlayerController : MonoBehaviour
         }
     }
 
-    void ClearState()
-    {
-        groundContactCount = steepContactCount = 0;
-        contactNormal = steepNormal = Vector3.zero;
-    }
-
-    void UpdateState()
-    {
-        stepsSinceLastGrounded += 1;
-        stepsSinceLastJump += 1;
-        velocity = rigidBody.velocity;
-        if (OnGround || SnapToGround() || CheckSteepContacts())
-        {
-            stepsSinceLastGrounded = 0;
-            if (stepsSinceLastJump > 1) jumpPhase = 0;
-            if (groundContactCount > 1)
-                contactNormal.Normalize();
-        }
-        else
-            contactNormal = Vector3.up;
-
-    }
-
     bool SnapToGround()
     {
         if (stepsSinceLastGrounded > 1 || stepsSinceLastJump <= 2)
@@ -231,7 +229,7 @@ public class PlayerController : MonoBehaviour
         if (speed > maxSnapSpeed)
             return false;
 
-        if (!Physics.Raycast(rigidBody.position, Vector3.down, out RaycastHit hit, probeDistance, probeMask))
+        if (!Physics.Raycast(transform.position, Vector3.down, out RaycastHit hit, probeDistance, probeMask))
         {
             if (hit.normal.y < minGroundDotProduct) return false;
 
